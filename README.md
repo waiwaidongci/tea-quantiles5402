@@ -13,6 +13,14 @@
 - 每次运行冻结参数、观测和SHA256。Redis任务由独立worker计算，写DB与共享产物卷；输入修改不会改写历史结果。
 - 负责人复核不可覆盖；审计记录登录、数据改动、排队、复核与导出；240请求/分钟限流、全局可恢复错误。
 
+## 合批精确中位数（跨检验点阈值询问）
+- 含水率原值留在各检验点本地（点侧SQLite，`points`容器），总台只询问「不超过指定阈值（含等值）的份数」；数值按百分之一百分点记值（0.00–100.00，共10001个刻度）。
+- 开算即锁定所选检验点的版本与份数（快照+SHA256）；引擎对累计份数二分定位中位次，奇数取中间一位、偶数取中间两位的平均；每点每次研究最多30个阈值（两次二分各14问+验证轮至多2问，恰好够用，超预算即失败）。
+- 回执按（运行,点位,阈值）归账：乱序与重传幂等，同键不同值即冲突失败；只采纳锁定版本的回执，计算期间数据更新的运行置「版本失效」，收齐原版回执才推进。
+- 全部进度由台账（median_questions/median_receipts）决定，worker中断重启后恢复原版锁定与已收回执，重发未答询问；另有15秒周期兜底重驱。
+- 页面：「检验点」核对版本、份数、在线状态与掉线期间更新事件（可模拟掉线与点侧数据变更）；「合批研究」发起研究、从等待回执到出数全程可见，结果含跨点同值核对（各点在中位值上的份数）与各点阈值清单。
+- 独立oracle：在points容器执行 `python -m scripts.check_median_oracle <run_id>`，直接读点侧原值重算合批中位数并与总台结果比对（版本须与锁定一致）。
+
 ## 快速启动
 ```bash
 cp .env.example .env
@@ -45,16 +53,17 @@ docker compose exec -T backend python -m scripts.seed_demo
 |计算|NumPy2.2、SciPy1.15，固定seed42|
 |数据库|PostgreSQL16|
 |任务|Redis7持久队列，Python独立worker，心跳healthcheck|
+|检验点|`points`容器运行`src.point_agent`：每点一个本地SQLite库与队列线程，原值不出点；心跳只报版本与份数|
 
 `frontend/src/`分api、stores、types、components/common、hooks、pages、router、utils、constants；`backend/src/`分config、models、schemas、services、controllers、routes、middlewares、utils、constants；`backend/scripts/seed_demo.py`自然键插入、重复不覆盖修改；`backend/migrations/README.md`说明schema版本。
 
-环境变量 `.env.example`：COMPOSE_PROJECT_NAME、FRONTEND_PORT、BACKEND_PORT、DB_PORT、DB_PASSWORD、JWT_SECRET、SEED_DEMO。开发时在本地venv安装backend/requirements.txt，设置DATABASE_URL、REDIS_URL、JWT_SECRET再运行uvicorn；前端开发经Nginx代理 `/api/` 到不带前缀的API。
+环境变量 `.env.example`：COMPOSE_PROJECT_NAME、FRONTEND_PORT、BACKEND_PORT、DB_PORT、DB_PASSWORD、JWT_SECRET、SEED_DEMO、POINT_TOKEN（检验点心跳令牌）、POINT_OFFLINE_AFTER（心跳失联判定秒数）。开发时在本地venv安装backend/requirements.txt，设置DATABASE_URL、REDIS_URL、JWT_SECRET再运行uvicorn；前端开发经Nginx代理 `/api/` 到不带前缀的API。
 
 共享枚举：角色admin/analyst/viewer和队列queued/running/completed/failed；后端`src/constants/enums.py`、认证与worker使用相同值；前端`src/types/enums.js`、状态与角色界面使用相同值。Google Fonts：Noto Serif SC + IBM Plex Mono；断网使用serif/monospace回退。
 
 ## 算法输入、失败态与复现
 输入为选定批次全部观测和参数，输出核心数值、明细、解释；参数经后端严格白名单和范围验证。中位数置信区间描述估计不确定性，不是下一份茶样的预测区间。。空批次拒绝；不完整字段/非有限数/非法计数拒绝；常量相关列与不足样本使任务failed并保留错误。固定seed42、输入checksum相同可复现。独立oracle：按线性插值手算分位数；固定seed重采样复现；常量与空组边界。
 
-已知边界：小型本地研究应用，使用合成数据，不含企业SSO与外发邮件；结果由人工复核，不自动执行业务决策；单worker恢复queued/running任务，数据库与Redis间未采用分布式事务。以当前测试目录TESTING.md记录实际验证结果。
+已知边界：小型本地研究应用，使用合成数据，不含企业SSO与外发邮件；结果由人工复核，不自动执行业务决策；单worker恢复queued/running任务，数据库与Redis间未采用分布式事务。合批中位数为单进程点代理模拟（四个检验点同容器、各自的SQLite库），真实部署时点侧库与代理应位于各检验点；阈值预算30对应0.00–100.00网格，改精度需同步调整预算。以当前测试目录TESTING.md记录实际验证结果。
 
 MIT License。

@@ -32,6 +32,8 @@ services:
       REDIS_URL: redis://redis:6379/0
       JWT_SECRET: ${JWT_SECRET:-local-demo-tea-quantiles-replace-for-production}
       SEED_DEMO: ${SEED_DEMO:-true}
+      POINT_TOKEN: ${POINT_TOKEN:-local-demo-point-token}
+      POINT_OFFLINE_AFTER: ${POINT_OFFLINE_AFTER:-20}
     ports: ["${BACKEND_PORT:-19240}:8000"]
     volumes: ["run-artifacts:/app/artifacts"]
     depends_on:
@@ -57,6 +59,23 @@ services:
       interval: 3s
       timeout: 4s
       retries: 20
+  points:
+    build: ./backend
+    container_name: ${COMPOSE_PROJECT_NAME:-tea-quantiles}-points
+    command: python -m src.point_agent
+    environment:
+      <<: *app-env
+      API_URL: http://backend:8000
+      POINT_DIR: /point-data
+    volumes: ["point-data:/point-data"]
+    depends_on:
+      backend: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,time; assert time.time()-os.stat('/tmp/points-heartbeat').st_mtime<15"]
+      interval: 3s
+      timeout: 4s
+      retries: 20
   frontend:
     build: ./frontend
     container_name: ${COMPOSE_PROJECT_NAME:-tea-quantiles}-frontend
@@ -72,3 +91,4 @@ volumes:
   db-data:
   redis-data:
   run-artifacts:
+  point-data:
